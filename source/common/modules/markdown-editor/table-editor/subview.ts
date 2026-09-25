@@ -17,7 +17,7 @@
  */
 
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
-import { EditorState, MapMode, StateField, EditorSelection, type ChangeSpec, type Range } from '@codemirror/state'
+import { EditorState, MapMode, StateField, EditorSelection, type ChangeSpec, type Extension, type Range } from '@codemirror/state'
 import { EditorView, drawSelection, type DecorationSet, Decoration, ViewPlugin, type ViewUpdate } from '@codemirror/view'
 import markdownParser from '../parser/markdown-parser'
 import { tableEditorKeymap } from '../keymaps/table-editor'
@@ -28,6 +28,7 @@ import { darkMode, useDarkModeEditor } from '../theme/dark-mode'
 import { markdownSyntaxHighlighter } from '../theme/syntax'
 import { clickListeners } from '../plugins/click-listeners'
 import { vimPlugin } from '../plugins/vim-mode'
+import { getCM } from '@replit/codemirror-vim'
 
 /**
  * A transaction filter that ensures that any changes made to the view that
@@ -115,6 +116,40 @@ const ensureBoundariesFilter = EditorState.transactionFilter.of((tr) => {
 
   return { ...tr, changes: safeChanges, selection: newSelection }
 })
+
+/**
+ * Creates a transaction filter for Vim mode. In Normal mode, Vim keeps the
+ * cursor on a character, never after the last one. But since a subview's line
+ * is the entire table row, Vim lets the cursor rest on the hidden text after
+ * the cell. This filter moves such a cursor back onto the cell's last
+ * character. It leaves Insert mode alone, which needs the position after the
+ * last character, and Visual mode, whose selections aren't empty.
+ *
+ * @param   {() => EditorView|undefined}  getView  Returns the subview
+ *
+ * @return  {Extension}                            The transaction filter
+ */
+function vimCursorFilter (getView: () => EditorView|undefined): Extension {
+  return EditorState.transactionFilter.of((tr) => {
+    const view = getView()
+    const vim = view !== undefined ? getCM(view)?.state.vim : undefined
+    if (tr.selection === undefined || vim == null || vim.insertMode || tr.annotation(syncAnnotation) === true) {
+      return tr
+    }
+
+    const [ cellFrom, cellTo ] = tr.startState.field(hiddenSpanField).cellRange
+    const from = tr.changes.mapPos(cellFrom, -1)
+    const to = tr.changes.mapPos(cellTo, 1)
+    if (to <= from || !tr.selection.ranges.some(range => range.empty && range.head >= to)) {
+      return tr
+    }
+
+    const ranges = tr.selection.ranges.map(range => {
+      return range.empty && range.head >= to ? EditorSelection.cursor(to - 1) : range
+    })
+    return { ...tr, selection: EditorSelection.create(ranges, tr.selection.mainIndex) }
+  })
+}
 
 interface hiddenSpanState {
   decorations: DecorationSet
@@ -251,6 +286,7 @@ export function createSubviewForCell (
         }
       }),
       ensureBoundariesFilter,
+      cfg.inputMode === 'vim' ? vimCursorFilter(() => subview) : [],
       EditorView.domEventHandlers(clickListeners())
     ]
   })
@@ -262,6 +298,11 @@ export function createSubviewForCell (
     // view.
     dispatch: dispatchFromSubview(mainView)
   })
+
+  // Apply the Vim cursor filter to the initial selection as well
+  if (cfg.inputMode === 'vim') {
+    subview.dispatch({ selection: subview.state.selection })
+  }
 
   // We must delay the subview focusing until the DOM has been updated and any
   // other callbacks and event listeners have been attached. We achieve this
