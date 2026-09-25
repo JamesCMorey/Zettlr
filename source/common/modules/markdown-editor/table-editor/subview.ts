@@ -27,6 +27,7 @@ import { getMainEditorThemes } from '../editor-extension-sets'
 import { darkMode, useDarkModeEditor } from '../theme/dark-mode'
 import { markdownSyntaxHighlighter } from '../theme/syntax'
 import { clickListeners } from '../plugins/click-listeners'
+import { vimPlugin } from '../plugins/vim-mode'
 
 /**
  * A transaction filter that ensures that any changes made to the view that
@@ -226,6 +227,8 @@ export function createSubviewForCell (
     doc: mainView.state.sliceDoc(),
     selection: mainView.state.selection,
     extensions: [
+      // Vim mode needs to be included first, before any other keymap.
+      cfg.inputMode === 'vim' ? vimPlugin() : [],
       // A minimal set of extensions
       tableEditorKeymap(mainView, cfg.shortcuts),
       drawSelection({ drawRangeCursor: false, cursorBlinkRate: 1000 }),

@@ -162,6 +162,10 @@ export const renderTables = [
     // Override the large margins from the main editor view
     '.cm-content .cm-table-editor-widget-wrapper .cm-scroller': { padding: '0' },
     '.cm-content .cm-table-editor-widget-wrapper .cm-content': { padding: '0' },
+    // Subviews sit inside the main editor's DOM, so its Vim styles reach them:
+    // hide the main Vim cursor and show the cell's cursor outside Normal mode
+    '.cm-scroller:has(.cm-table-editor-widget-wrapper .cm-editor) > .cm-vimCursorLayer': { display: 'none' },
+    '.cm-table-editor-widget-wrapper .cm-scroller:not(.cm-vimMode) > .cm-cursorLayer': { display: 'block' },
     // DARK STYLES
     '&dark div.cm-table-editor-widget-wrapper table': {
       // Implement Artem's theme
