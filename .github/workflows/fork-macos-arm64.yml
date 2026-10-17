@@ -1,0 +1,76 @@
+name: Fork build (macOS arm64)
+
+# Fork-only workflow (JamesCMorey/Zettlr). Builds an Apple Silicon DMG of this
+# branch and publishes it as a GitHub release. The fork has no Developer ID
+# certificate, so the app is ad-hoc signed and not notarized.
+
+on:
+  push:
+    branches:
+      - vim-table-fixes
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  build_macos_arm64:
+    name: macOS (arm64)
+    if: ${{ github.repository == 'JamesCMorey/Zettlr' }}
+    runs-on: macos-latest
+    env:
+      npm_config_arch: arm64
+    steps:
+      - name: Checkout branch ${{ github.ref_name }}
+        uses: actions/checkout@v6
+      - name: Enable Yarn 4.x
+        run: corepack enable
+      - name: Setup NodeJS ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+      - name: Set up build environment
+        run: yarn install --immutable
+      - name: Skip Developer ID signing (no certificate in this fork)
+        run: |
+          perl -pi -e 's/osxSign: \{/osxSign: false && {/' forge.config.js
+          grep -q 'osxSign: false && {' forge.config.js
+      - name: Package
+        run: yarn package:mac-arm
+      - name: Ad-hoc sign the app
+        run: |
+          codesign --force --deep --sign - out/Zettlr-darwin-arm64/Zettlr.app
+          codesign --verify --deep --strict --verbose=2 out/Zettlr-darwin-arm64/Zettlr.app
+      - name: Build DMG
+        run: yarn release:mac-arm -c.mac.identity=null
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(jq -r '.version' package.json)
+          short=$(git rev-parse --short HEAD)
+          tag="v${version}-vimfix-${short}"
+          cat > notes.md <<EOF
+          Unofficial build of Zettlr ${version} from branch \`${GITHUB_REF_NAME}\` (${short}) with two fixes:
+          Vim mode works inside table cells, and the Normal-mode cursor stays off the hidden text after a cell.
+
+          Apple Silicon only. The app is ad-hoc signed, not notarized, so macOS blocks it after a browser download.
+          Either download it with \`gh release download ${tag} -R ${GITHUB_REPOSITORY}\`, or, after copying
+          Zettlr.app to /Applications, run \`xattr -dr com.apple.quarantine /Applications/Zettlr.app\`.
+          EOF
+          gh release create "$tag" "release/Zettlr-${version}-arm64.dmg" \
+            --target "$GITHUB_SHA" \
+            --title "Zettlr ${version} + Vim table fixes (${short}, Apple Silicon)" \
+            --notes-file notes.md
