@@ -1,8 +1,10 @@
 name: Fork build (macOS arm64)
 
-# Fork-only workflow (JamesCMorey/Zettlr). Builds an Apple Silicon DMG of this
-# branch and publishes it as a GitHub release. The fork has no Developer ID
-# certificate, so the app is ad-hoc signed and not notarized.
+# Fork-only workflow (JamesCMorey/Zettlr). Builds an Apple Silicon DMG and an
+# update zip of this branch and publishes them as a GitHub release. The fork has
+# no Developer ID certificate: the app is signed with the fork's own self-signed
+# identity (the same one for every build, so keychain grants and in-place
+# updates carry over) and is not notarized.
 
 on:
   push:
@@ -23,6 +25,9 @@ defaults:
 
 env:
   NODE_VERSION: '22'
+  # SHA-1 of the fork's self-signed code-signing certificate (public)
+  SIGN_IDENTITY: 7B6FFCA47BAC42573DBC36643F1CB2F8C63EF4E2
+  APP: out/Zettlr-darwin-arm64/Zettlr.app
 
 jobs:
   build_macos_arm64:
@@ -43,34 +48,89 @@ jobs:
           cache: 'yarn'
       - name: Set up build environment
         run: yarn install --immutable
+      - name: Fork version
+        run: |
+          base=$(jq -r '.version' package.json)
+          echo "FORK_VERSION=${base}-fork.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
       - name: Skip Developer ID signing (no certificate in this fork)
         run: |
           perl -pi -e 's/osxSign: \{/osxSign: false && {/' forge.config.js
           grep -q 'osxSign: false && {' forge.config.js
       - name: Package
+        env:
+          # Zettlr's own update check would offer the official releases,
+          # which would replace this fork.
+          ZETTLR_DISABLE_UPDATE_CHECK: '1'
         run: yarn package:mac-arm
-      - name: Ad-hoc sign the app
+      - name: Record the fork version in the app
         run: |
-          codesign --force --deep --sign - out/Zettlr-darwin-arm64/Zettlr.app
-          codesign --verify --deep --strict --verbose=2 out/Zettlr-darwin-arm64/Zettlr.app
+          printf '{"version":"%s","commit":"%s"}\n' "$FORK_VERSION" "$GITHUB_SHA" \
+            > "$APP/Contents/Resources/fork-build.json"
+          cat "$APP/Contents/Resources/fork-build.json"
+      - name: Sign with the fork's code-signing identity
+        env:
+          P12: ${{ secrets.MACOS_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/fork-signing.keychain-db"
+          kcpw=$(openssl rand -hex 16)
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
+          security import "$RUNNER_TEMP/sign.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/sign.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          codesign --force --deep --sign "$SIGN_IDENTITY" --keychain "$kc" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -d -r- "$APP" 2>&1 | tee "$RUNNER_TEMP/dr.txt"
+          # A stable identity gives a certificate-based requirement, not a cdhash.
+          grep '^designated => ' "$RUNNER_TEMP/dr.txt" | grep -q 'certificate'
+      - name: Check that the previous release accepts this build as an update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --json tagName --jq '[.[].tagName | select(test("-fork\\."))][0] // empty')
+          if [ -z "$prev" ]; then
+            echo "No earlier fork release with an update zip; nothing to compare."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/prev"
+          gh release download "$prev" -R "$GITHUB_REPOSITORY" -p '*-darwin-arm64.zip' -D "$RUNNER_TEMP/prev"
+          ditto -x -k "$RUNNER_TEMP"/prev/*.zip "$RUNNER_TEMP/prev/x"
+          req=$(codesign -d -r- "$RUNNER_TEMP/prev/x/Zettlr.app" 2>&1 | sed -n 's/^designated => //p')
+          echo "Requirement of $prev: $req"
+          # The same check Squirrel.Mac runs before it installs an update.
+          codesign --verify --deep --strict --verbose=2 --test-requirement "=$req" "$APP"
+      - name: Build update zip
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$RUNNER_TEMP/Zettlr-${FORK_VERSION}-darwin-arm64.zip"
       - name: Build DMG
-        run: yarn release:mac-arm -c.mac.identity=null
+        run: |
+          yarn release:mac-arm -c.mac.identity=null
+          codesign --verify --deep --strict "$APP"
+          version=$(jq -r '.version' package.json)
+          cp "release/Zettlr-${version}-arm64.dmg" "$RUNNER_TEMP/Zettlr-${FORK_VERSION}-arm64.dmg"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(jq -r '.version' package.json)
           short=$(git rev-parse --short HEAD)
-          tag="v${version}-vimfix-${short}"
+          tag="v${FORK_VERSION}"
           cat > notes.md <<EOF
-          Unofficial build of Zettlr ${version} from branch \`${GITHUB_REF_NAME}\` (${short}) with two fixes:
-          Vim mode works inside table cells, and the Normal-mode cursor stays off the hidden text after a cell.
+          Unofficial build of Zettlr from branch \`${GITHUB_REF_NAME}\` (${short}) with the fork's Vim table fixes.
+          Apple Silicon only. Signed with the fork's own (self-signed) certificate, not notarized.
 
-          Apple Silicon only. The app is ad-hoc signed, not notarized, so macOS blocks it after a browser download.
-          Either download it with \`gh release download ${tag} -R ${GITHUB_REPOSITORY}\`, or, after copying
-          Zettlr.app to /Applications, run \`xattr -dr com.apple.quarantine /Applications/Zettlr.app\`.
+          First install: download without a browser, so macOS doesn't block it:
+          \`curl -fL -o ~/Downloads/Zettlr-fork.dmg https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/Zettlr-${FORK_VERSION}-arm64.dmg\`
+          (or \`gh release download ${tag} -R ${GITHUB_REPOSITORY}\`), then open the DMG and drag Zettlr to Applications.
+          Downloaded in a browser instead? Run \`xattr -dr com.apple.quarantine /Applications/Zettlr.app\` after copying.
           EOF
-          gh release create "$tag" "release/Zettlr-${version}-arm64.dmg" \
+          gh release create "$tag" \
+            "$RUNNER_TEMP/Zettlr-${FORK_VERSION}-arm64.dmg" \
+            "$RUNNER_TEMP/Zettlr-${FORK_VERSION}-darwin-arm64.zip" \
             --target "$GITHUB_SHA" \
-            --title "Zettlr ${version} + Vim table fixes (${short}, Apple Silicon)" \
+            --title "Zettlr ${FORK_VERSION} (Vim table fixes, Apple Silicon)" \
             --notes-file notes.md
