@@ -166,6 +166,8 @@ export const renderTables = [
     // hide the main Vim cursor and show the cell's cursor outside Normal mode
     '.cm-scroller:has(.cm-table-editor-widget-wrapper .cm-editor) > .cm-vimCursorLayer': { display: 'none' },
     '.cm-table-editor-widget-wrapper .cm-scroller:not(.cm-vimMode) > .cm-cursorLayer': { display: 'block' },
+    // Vim draws a hollow block when the (unfocused) main editor contains it
+    '.cm-table-editor-widget-wrapper .cm-editor.cm-focused .cm-fat-cursor': { background: '#ff9696', outline: 'none', color: 'inherit !important' },
     // DARK STYLES
     '&dark div.cm-table-editor-widget-wrapper table': {
       // Implement Artem's theme
