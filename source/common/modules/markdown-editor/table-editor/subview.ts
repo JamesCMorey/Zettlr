@@ -17,7 +17,7 @@
  */
 
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
-import { EditorState, MapMode, StateField, EditorSelection, type ChangeSpec, type Extension, type Range } from '@codemirror/state'
+import { EditorState, MapMode, Prec, StateField, EditorSelection, type ChangeSpec, type Extension, type Range } from '@codemirror/state'
 import { EditorView, drawSelection, type DecorationSet, Decoration, ViewPlugin, type ViewUpdate } from '@codemirror/view'
 import markdownParser from '../parser/markdown-parser'
 import { tableEditorKeymap } from '../keymaps/table-editor'
@@ -29,6 +29,7 @@ import { markdownSyntaxHighlighter } from '../theme/syntax'
 import { clickListeners } from '../plugins/click-listeners'
 import { vimPlugin } from '../plugins/vim-mode'
 import { getCM } from '@replit/codemirror-vim'
+import { moveNextRow } from './commands/rows'
 
 /**
  * A transaction filter that ensures that any changes made to the view that
@@ -149,6 +150,29 @@ function vimCursorFilter (getView: () => EditorView|undefined): Extension {
     })
     return { ...tr, selection: EditorSelection.create(ranges, tr.selection.mainIndex) }
   })
+}
+
+/**
+ * Creates a keydown handler for Vim mode. Vim maps Enter in Normal mode to
+ * `j^`, which in a cell lands on the start of the same cell. This handler runs
+ * before Vim's and moves to the cell below instead, like Enter in Insert mode.
+ *
+ * @param   {EditorView}  mainView  The main view
+ *
+ * @return  {Extension}             The event handler
+ */
+function vimEnterHandler (mainView: EditorView): Extension {
+  return Prec.highest(EditorView.domEventHandlers({
+    keydown (event, view) {
+      const vim = getCM(view)?.state.vim
+      if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey ||
+        vim == null || vim.insertMode || vim.visualMode) {
+        return false
+      }
+      moveNextRow(mainView)
+      return true
+    }
+  }))
 }
 
 interface hiddenSpanState {
@@ -287,6 +311,7 @@ export function createSubviewForCell (
       }),
       ensureBoundariesFilter,
       cfg.inputMode === 'vim' ? vimCursorFilter(() => subview) : [],
+      cfg.inputMode === 'vim' ? vimEnterHandler(mainView) : [],
       EditorView.domEventHandlers(clickListeners())
     ]
   })
