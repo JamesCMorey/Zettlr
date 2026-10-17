@@ -26,6 +26,7 @@ import {
   handleExitArguments
 } from '@providers/cli-provider'
 import { getAppServiceContainer, isAppServiceContainerReady } from './app/app-service-container'
+import { startForkUpdater } from './app/fork-updater'
 
 handleExitArguments()
 
@@ -121,6 +122,7 @@ app.whenReady().then(() => {
   bootApplication().then(() => {
     getAppServiceContainer().commands.run('roots-add', filesBeforeOpen.concat(extractFilesFromArgv(process.argv)))
       .catch(err => console.error(err))
+    startForkUpdater(getAppServiceContainer().log)
   }).catch(err => {
     console.error(err)
     app.exit(1)
