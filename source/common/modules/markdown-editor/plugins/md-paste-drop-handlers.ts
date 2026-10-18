@@ -14,7 +14,7 @@
  * END HEADER
  */
 
-import { type DOMEventHandlers } from '@codemirror/view'
+import { type DOMEventHandlers, ViewPlugin } from '@codemirror/view'
 import html2md from '@common/util/html-to-md'
 import { configField } from '../util/configuration'
 import { pathBasename, pathDirname, pathExtname, relativePath } from '@common/util/renderer-path-polyfill'
@@ -198,10 +198,11 @@ export const mdPasteDropHandlers: DOMEventHandlers<any> = {
       return false
     }
 
-    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
-    if (pos === null) {
-      return false
-    }
+    // Drop onto a table cell at the end of its text, else at the position
+    // closest to the mouse, even if that is beside or below the text.
+    const cell = event.target instanceof Element ? event.target.closest<HTMLElement>('td[data-cell-to]') : null
+    const pos = cell !== null ? parseInt(cell.dataset.cellTo!, 10) : view.posAtCoords({ x: event.clientX, y: event.clientY }, false)
+    const separator = cell !== null ? ' ' : '\n' // A newline would break the table row
 
     event.preventDefault()
     event.stopPropagation()
@@ -251,7 +252,7 @@ export const mdPasteDropHandlers: DOMEventHandlers<any> = {
       }
 
       Promise.allSettled(allPromises).then(() => {
-        view.dispatch({ changes: { from: pos, insert: insertions.join('\n') } })
+        view.dispatch({ changes: { from: pos, insert: insertions.join(separator) } })
       }).catch(err => console.error(err))
 
       return true
@@ -279,3 +280,15 @@ export const mdPasteDropHandlers: DOMEventHandlers<any> = {
     return false
   }
 }
+
+/**
+ * CodeMirror only passes drops on the text itself to the handlers above, not
+ * drops on the margins or gutters, or on widgets such as images and tables.
+ * Those would reach the window's drop handler, which opens the files instead.
+ * (Drops the handlers already took never bubble up to here.)
+ */
+export const mdDropOutsideContent = ViewPlugin.define(view => {
+  const onDrop = (event: DragEvent): void => { mdPasteDropHandlers.drop?.(event, view) }
+  view.dom.addEventListener('drop', onDrop)
+  return { destroy () { view.dom.removeEventListener('drop', onDrop) } }
+})

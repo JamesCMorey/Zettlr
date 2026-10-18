@@ -56,7 +56,7 @@ import { distractionFree } from './plugins/distraction-free'
 import { languageTool } from './linters/language-tool'
 import { statusbar } from './statusbar'
 import { renderers } from './renderers'
-import { mdPasteDropHandlers } from './plugins/md-paste-drop-handlers'
+import { mdDropOutsideContent, mdPasteDropHandlers } from './plugins/md-paste-drop-handlers'
 import { footnoteGutter } from './plugins/footnote-gutter'
 import { yamlFrontmatterLint } from './linters/yaml-frontmatter-lint'
 import {
@@ -306,6 +306,7 @@ export function getMarkdownExtensions (options: CoreExtensionOptions): Extension
     // HTML should not add the verbatim HTML code, but rather convert it to
     // Markdown prior. Additionally, images should get preferential treatment.
     EditorView.domEventHandlers(mdPasteDropHandlers),
+    mdDropOutsideContent,
     // We need our custom keymaps first
     // The parser generates the AST for the document ...
     markdownParser({
