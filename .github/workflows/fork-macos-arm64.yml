@@ -49,9 +49,13 @@ jobs:
       - name: Set up build environment
         run: yarn install --immutable
       - name: Fork version
+        # update.electronjs.org takes the first release in GitHub's REST list,
+        # which orders a day's releases by tag text (fork.9 before fork.10). A
+        # letter and a zero-padded run number sort the same as text and as
+        # semver, and after every older fork.<n> tag (4 digits: up to run 9999).
         run: |
           base=$(jq -r '.version' package.json)
-          echo "FORK_VERSION=${base}-fork.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "FORK_VERSION=${base}-fork.r$(printf '%04d' "$GITHUB_RUN_NUMBER")" >> "$GITHUB_ENV"
       - name: Skip Developer ID signing (no certificate in this fork)
         run: |
           perl -pi -e 's/osxSign: \{/osxSign: false && {/' forge.config.js
