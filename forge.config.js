@@ -295,7 +295,10 @@ module.exports = {
       ? [new FusesPlugin({
           version: FuseVersion.V1,
           [FuseV1Options.RunAsNode]: false,
-          [FuseV1Options.EnableCookieEncryption]: true,
+          // Fork: off, so the app never reads "Zettlr Safe Storage". macOS
+          // keys a self-signed app's keychain access by cdhash, so every
+          // update asked for it again.
+          [FuseV1Options.EnableCookieEncryption]: false,
           [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
           [FuseV1Options.EnableNodeCliInspectArguments]: false,
           [FuseV1Options.GrantFileProtocolExtraPrivileges]: true
