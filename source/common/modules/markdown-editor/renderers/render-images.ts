@@ -12,15 +12,14 @@
  * END HEADER
  */
 
-import { renderInlineWidgets } from './base-renderer'
 import { type SyntaxNode, type SyntaxNodeRef } from '@lezer/common'
-import { EditorView, WidgetType } from '@codemirror/view'
-import { type EditorState } from '@codemirror/state'
+import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
+import { type EditorState, type Range } from '@codemirror/state'
 import { configField } from '../util/configuration'
+import { rangeInSelection } from '../util/range-in-selection'
 import makeValidUri from '@common/util/make-valid-uri'
 import { linkImageMenu } from '../context-menu/link-image-menu'
 import { trans } from '@common/i18n-renderer'
-import clickAndSelect from './click-and-select'
 import { pathDirname } from '@common/util/renderer-path-polyfill'
 import { syntaxTree } from '@codemirror/language'
 import { parsePandocAttributes, type ParsedPandocAttributes } from 'source/common/pandoc-util/parse-pandoc-attributes'
@@ -100,7 +99,10 @@ class ImageWidget extends WidgetType {
   }
 
   eq (other: ImageWidget) {
-    return this.imageTitle === other.imageTitle && this.imageUrl === other.imageUrl && this.altText === other.altText
+    // NOTE: The positions are compared so that updateDOM keeps the dataset
+    // current, since the image is no longer re-created on every cursor move.
+    return this.imageTitle === other.imageTitle && this.imageUrl === other.imageUrl && this.altText === other.altText &&
+      this.node.from === other.node.from && this.node.to === other.node.to
   }
 
   get estimatedHeight (): number {
@@ -154,9 +156,12 @@ class ImageWidget extends WidgetType {
     img.dataset.originalUrl = this.imageUrl
     img.dataset.title = this.imageTitle
 
-    // Select the underlying node
+    // Select the underlying node. NOTE: Not via clickAndSelect, since the
+    // widget now sits at the end of the node, not in place of it.
     img.addEventListener('click', event => {
-      clickAndSelect(view)(event)
+      event.preventDefault()
+      event.stopPropagation()
+      view.dispatch({ selection: { anchor: parseInt(img.dataset.from!, 10), head: parseInt(img.dataset.to!, 10) } })
     })
 
     // Display a replacement image in case the correct one is not found
@@ -462,6 +467,45 @@ function createWidget (state: EditorState, node: SyntaxNodeRef): ImageWidget | u
   }
 }
 
+/**
+ * Unlike the other inline renderers, this keeps the image preview rendered
+ * while the cursor is on the image's Markdown, and only shows or hides that
+ * Markdown in front of it. Removing the image whenever the cursor touches it
+ * makes everything below jump by the image's height.
+ *
+ * @param   {EditorView}     view  The editor view
+ *
+ * @return  {DecorationSet}        The image widgets and hidden image sources
+ */
+function renderImagePreviews (view: EditorView): DecorationSet {
+  const decorations: Range<Decoration>[] = []
+  const includeAdjacent = view.state.field(configField, false)?.previewModeShowSyntaxWhenCursorIsAdjacent ?? true
+
+  for (const { from, to } of view.visibleRanges) {
+    syntaxTree(view.state).iterate({
+      from,
+      to,
+      enter: (node) => {
+        if (!shouldHandleNode(node)) {
+          return
+        }
+
+        const widget = createWidget(view.state, node)
+        if (widget === undefined) {
+          return
+        }
+
+        if (!rangeInSelection(view.state.selection, node.from, node.to, includeAdjacent)) {
+          decorations.push(Decoration.replace({}).range(node.from, node.to))
+        }
+        decorations.push(Decoration.widget({ widget, side: 1 }).range(node.to))
+      }
+    })
+  }
+
+  return Decoration.set(decorations, true)
+}
+
 export const renderImages = [
   EditorView.baseTheme({
     'figure.image-preview': {
@@ -518,5 +562,19 @@ export const renderImages = [
       }
     }
   }),
-  renderInlineWidgets(shouldHandleNode, createWidget)
+  ViewPlugin.fromClass(class {
+    decorations: DecorationSet
+
+    constructor (view: EditorView) {
+      this.decorations = renderImagePreviews(view)
+    }
+
+    update (update: ViewUpdate): void {
+      if (update.docChanged || update.viewportChanged || update.selectionSet) {
+        this.decorations = renderImagePreviews(update.view)
+      }
+    }
+  }, {
+    decorations: v => v.decorations
+  })
 ]
