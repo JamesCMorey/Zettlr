@@ -495,8 +495,17 @@ function renderImagePreviews (view: EditorView): DecorationSet {
           return
         }
 
+        // An image alone on its line goes below its Markdown, which is only
+        // made invisible, so that showing it never moves the text below.
+        const line = view.state.doc.lineAt(node.from)
+        const isAlone = line.text.trim() === view.state.sliceDoc(node.from, node.to)
+        if (isAlone) {
+          decorations.push(Decoration.line({ class: 'cm-image-line' }).range(line.from))
+        }
+
         if (!rangeInSelection(view.state.selection, node.from, node.to, includeAdjacent)) {
-          decorations.push(Decoration.replace({}).range(node.from, node.to))
+          const hidden = isAlone ? Decoration.mark({ class: 'cm-image-source-hidden' }) : Decoration.replace({})
+          decorations.push(hidden.range(node.from, node.to))
         }
         decorations.push(Decoration.widget({ widget, side: 1 }).range(node.to))
       }
@@ -508,6 +517,8 @@ function renderImagePreviews (view: EditorView): DecorationSet {
 
 export const renderImages = [
   EditorView.baseTheme({
+    '.cm-image-line figure.image-preview': { display: 'block' },
+    '.cm-image-source-hidden': { visibility: 'hidden' },
     'figure.image-preview': {
       position: 'relative',
       display: 'inline-block',
