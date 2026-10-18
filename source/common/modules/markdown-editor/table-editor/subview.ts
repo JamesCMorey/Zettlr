@@ -471,8 +471,8 @@ export function createSubviewForCell (
 export const subviewUpdatePlugin = ViewPlugin.define(view => ({
   update (u: ViewUpdate) {
     const cells = [
-      ...view.dom.querySelectorAll('.cm-table-editor-widget td'),
-      ...view.dom.querySelectorAll('.cm-table-editor-widget th')
+      ...view.dom.querySelectorAll('.cm-table-editor-widget-wrapper td'),
+      ...view.dom.querySelectorAll('.cm-table-editor-widget-wrapper th')
     ] as HTMLTableCellElement[]
 
     for (const cell of cells) {
