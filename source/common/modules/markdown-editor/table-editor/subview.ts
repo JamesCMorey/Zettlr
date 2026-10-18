@@ -16,9 +16,9 @@
  * END HEADER
  */
 
-import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
+import { syntaxHighlighting, defaultHighlightStyle, syntaxTree } from '@codemirror/language'
 import { EditorState, MapMode, Prec, StateField, EditorSelection, type ChangeSpec, type Extension, type Range } from '@codemirror/state'
-import { EditorView, drawSelection, type DecorationSet, Decoration, ViewPlugin, type ViewUpdate } from '@codemirror/view'
+import { EditorView, drawSelection, type DecorationSet, Decoration, ViewPlugin, type ViewUpdate, BlockType } from '@codemirror/view'
 import markdownParser from '../parser/markdown-parser'
 import { tableEditorKeymap } from '../keymaps/table-editor'
 import { dispatchFromSubview, maybeDispatchToSubview, syncAnnotation } from './util/data-exchange'
@@ -29,7 +29,9 @@ import { markdownSyntaxHighlighter } from '../theme/syntax'
 import { clickListeners } from '../plugins/click-listeners'
 import { vimPlugin } from '../plugins/vim-mode'
 import { getCM } from '@replit/codemirror-vim'
-import { moveNextRow } from './commands/rows'
+import { moveNextRow, movePrevRow } from './commands/rows'
+import { findColumnIndexByRange, findRowIndexByRange, getTableCellOffsets, mapSelectionsWithTables } from './commands/util'
+import { parseTableNode } from '../../markdown-utils/markdown-ast/parse-table-node'
 
 /**
  * A transaction filter that ensures that any changes made to the view that
@@ -153,27 +155,153 @@ function vimCursorFilter (getView: () => EditorView|undefined): Extension {
 }
 
 /**
- * Creates a keydown handler for Vim mode. Vim maps Enter in Normal mode to
- * `j^`, which in a cell lands on the start of the same cell. This handler runs
- * before Vim's and moves to the cell below instead, like Enter in Insert mode.
+ * Returns the key of a bare `h`, `j`, `k` or `l` press that Vim would take as
+ * a plain motion in Normal mode: no modifiers, count, operator, register or
+ * pending command (such as `f` or `r`).
+ *
+ * @param   {KeyboardEvent}       event  The keydown event
+ * @param   {EditorView}          view   The view that received it
+ *
+ * @return  {string|undefined}           The key, or undefined
+ */
+function plainVimMotionKey (event: KeyboardEvent, view: EditorView): string|undefined {
+  const vim = getCM(view)?.state.vim
+  if (![ 'h', 'j', 'k', 'l' ].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey ||
+    vim == null || vim.insertMode || vim.visualMode) {
+    return undefined
+  }
+  const input = vim.inputState
+  if (input.keyBuffer.length > 0 || input.prefixRepeat.length > 0 || input.operator != null || input.registerName != null) {
+    return undefined
+  }
+  return event.key
+}
+
+/**
+ * Moves the main selection out of the table it is in, to the start of the line
+ * below (forward) or above it, and focuses the main view.
+ *
+ * @param   {EditorView}  mainView  The main view
+ * @param   {boolean}     forward   Whether to leave below the table
+ */
+function leaveTable (mainView: EditorView, forward: boolean): void {
+  const table = mapSelectionsWithTables(mainView, ctx => ctx.tableNode)[0]
+  const pos = table === undefined ? -1 : forward ? table.to + 1 : table.from - 1
+  if (pos < 0 || pos > mainView.state.doc.length) {
+    return
+  }
+  mainView.dispatch({ selection: { anchor: mainView.state.doc.lineAt(pos).from }, scrollIntoView: true })
+  mainView.focus()
+}
+
+/**
+ * Moves the main selection to the end of the previous cell or the start of the
+ * next cell in the same row, if there is one.
+ *
+ * @param   {EditorView}  mainView  The main view
+ * @param   {number}      step      -1 for the previous cell, 1 for the next
+ */
+function moveInRow (mainView: EditorView, step: number): void {
+  const anchor = mapSelectionsWithTables(mainView, ctx => {
+    const range = mainView.state.selection.main
+    const row = findRowIndexByRange(range, ctx.offsets.outer, 'anchor')
+    const col = findColumnIndexByRange(range, ctx.offsets.outer, 'anchor')
+    return row !== undefined && col !== undefined ? ctx.offsets.inner[row][col + step]?.[step < 0 ? 1 : 0] : undefined
+  })[0]
+  if (anchor !== undefined) {
+    mainView.dispatch({ selection: { anchor } })
+  }
+}
+
+/**
+ * Creates a keydown handler for Vim mode, which runs before Vim's. Vim maps
+ * Enter in Normal mode to `j^`, which in a cell lands on the start of the same
+ * cell; this handler moves to the cell below instead, like Enter in Insert
+ * mode. It also lets `hjkl` leave the cell at its edges: `h` and `l` to the
+ * neighbouring cell in the row, `j` and `k` to the cell below or above, or
+ * out of the table from its last or first row.
  *
  * @param   {EditorView}  mainView  The main view
  *
  * @return  {Extension}             The event handler
  */
-function vimEnterHandler (mainView: EditorView): Extension {
+function vimKeyHandler (mainView: EditorView): Extension {
   return Prec.highest(EditorView.domEventHandlers({
     keydown (event, view) {
       const vim = getCM(view)?.state.vim
-      if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey ||
-        vim == null || vim.insertMode || vim.visualMode) {
+      if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
+        vim != null && !vim.insertMode && !vim.visualMode) {
+        moveNextRow(mainView)
+        return true
+      }
+
+      const key = plainVimMotionKey(event, view)
+      const range = view.state.selection.main
+      if (key === undefined || view.state.selection.ranges.length > 1) {
         return false
       }
-      moveNextRow(mainView)
+
+      const [ cellFrom, cellTo ] = view.state.field(hiddenSpanField).cellRange
+      if (key === 'h' || key === 'l') {
+        if (key === 'h' ? range.head > cellFrom : range.head < Math.max(cellFrom, cellTo - 1)) {
+          return false
+        }
+        moveInRow(mainView, key === 'h' ? -1 : 1)
+        return true
+      }
+
+      // `j` and `k` move by visual line, so stay in the cell while it wraps
+      const target = view.moveVertically(range, key === 'j').head
+      if (target !== range.head && target >= cellFrom && target <= cellTo) {
+        return false
+      }
+      if (!(key === 'j' ? moveNextRow(mainView) : movePrevRow(mainView))) {
+        leaveTable(mainView, key === 'j')
+      }
       return true
     }
   }))
 }
+
+/**
+ * Creates a keydown handler for Vim mode in the main view: `j` on the last
+ * visual line before a table enters its first cell, and `k` on the first
+ * visual line after a table enters the first cell of its last row. Otherwise,
+ * Vim's `gj` and `gk` skip the table, since it is a single block widget.
+ *
+ * @return  {Extension}  The event handler
+ */
+export const vimTableEntryHandler = Prec.highest(EditorView.domEventHandlers({
+  keydown (event, view) {
+    const key = plainVimMotionKey(event, view)
+    const range = view.state.selection.main
+    if ((key !== 'j' && key !== 'k') || view.state.selection.ranges.length > 1) {
+      return false
+    }
+
+    const forward = key === 'j'
+    const line = view.state.doc.lineAt(range.head)
+    const pos = forward ? line.to + 1 : line.from - 1
+    const target = view.moveVertically(range, forward).head
+    if (pos < 0 || pos > view.state.doc.length || (target >= line.from && target <= line.to)) {
+      return false
+    }
+
+    const block = view.lineBlockAt(pos)
+    const table = syntaxTree(view.state).topNode.getChildren('Table').find(node => node.from === block.from)
+    if (block.type !== BlockType.WidgetRange || table === undefined || (forward ? table.from : table.to) !== pos) {
+      return false
+    }
+    const ast = parseTableNode(table, view.state.sliceDoc())
+    if (ast.type !== 'Table') {
+      return false
+    }
+
+    const { inner } = getTableCellOffsets(ast)
+    view.dispatch({ selection: { anchor: inner[forward ? 0 : inner.length - 1][0][0] }, scrollIntoView: true })
+    return true
+  }
+}))
 
 interface hiddenSpanState {
   decorations: DecorationSet
@@ -311,7 +439,7 @@ export function createSubviewForCell (
       }),
       ensureBoundariesFilter,
       cfg.inputMode === 'vim' ? vimCursorFilter(() => subview) : [],
-      cfg.inputMode === 'vim' ? vimEnterHandler(mainView) : [],
+      cfg.inputMode === 'vim' ? vimKeyHandler(mainView) : [],
       EditorView.domEventHandlers(clickListeners())
     ]
   })

@@ -13,7 +13,7 @@
  */
 import { type DecorationSet, EditorView } from '@codemirror/view'
 import { type EditorState, StateField } from '@codemirror/state'
-import { subviewUpdatePlugin } from './subview'
+import { subviewUpdatePlugin, vimTableEntryHandler } from './subview'
 import { TableWidget } from './widget'
 
 // TODO: Think of an appropriate place for this. Or do we want to keep this
@@ -177,5 +177,6 @@ export const renderTables = [
       }
     }
   }),
-  subviewUpdatePlugin
+  subviewUpdatePlugin,
+  vimTableEntryHandler
 ]
