@@ -62,6 +62,10 @@ export function maybeDispatchToSubview (subview: EditorView, tr: Transaction): v
     // The TransactionSpecs will be merged, with
     // the new annotations being appended to the
     // end of the existing annotations list
-    subview.dispatch(tr, { annotations })
+    // Undo and redo restore the main view's selection from before the change,
+    // but cursor moves in a cell don't reach the main view, so that is often
+    // the cell's start. Keep the cell's cursor where it is instead.
+    const selection = tr.isUserEvent('undo') || tr.isUserEvent('redo') ? subview.state.selection : undefined
+    subview.dispatch(tr, { annotations, selection })
   }
 }
