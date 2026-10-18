@@ -29,6 +29,7 @@ import { markdownSyntaxHighlighter } from '../theme/syntax'
 import { clickListeners } from '../plugins/click-listeners'
 import { vimPlugin } from '../plugins/vim-mode'
 import { getCM } from '@replit/codemirror-vim'
+import { undo, redo } from '@codemirror/commands'
 import { moveNextRow, movePrevRow } from './commands/rows'
 import { findColumnIndexByRange, findRowIndexByRange, getTableCellOffsets, mapSelectionsWithTables } from './commands/util'
 import { parseTableNode } from '../../markdown-utils/markdown-ast/parse-table-node'
@@ -125,7 +126,8 @@ const ensureBoundariesFilter = EditorState.transactionFilter.of((tr) => {
  * cursor on a character, never after the last one. But since a subview's line
  * is the entire table row, Vim lets the cursor rest on the hidden text after
  * the cell. This filter moves such a cursor back onto the cell's last
- * character. It leaves Insert mode alone, which needs the position after the
+ * character, also after changes from the main view, such as an undo, which
+ * restores the main view's selection. It leaves Insert mode alone, which needs the position after the
  * last character, and Visual mode, whose selections aren't empty.
  *
  * @param   {() => EditorView|undefined}  getView  Returns the subview
@@ -136,7 +138,7 @@ function vimCursorFilter (getView: () => EditorView|undefined): Extension {
   return EditorState.transactionFilter.of((tr) => {
     const view = getView()
     const vim = view !== undefined ? getCM(view)?.state.vim : undefined
-    if (tr.selection === undefined || vim == null || vim.insertMode || tr.annotation(syncAnnotation) === true) {
+    if (tr.selection === undefined || vim == null || vim.insertMode) {
       return tr
     }
 
@@ -155,9 +157,26 @@ function vimCursorFilter (getView: () => EditorView|undefined): Extension {
 }
 
 /**
+ * Returns whether Vim is in Normal mode with no count, operator, register or
+ * pending command (such as `f` or `r`) typed yet.
+ *
+ * @param   {EditorView}  view  The view
+ *
+ * @return  {boolean}           Whether the next key starts a new command
+ */
+function vimNormalModeIdle (view: EditorView): boolean {
+  const vim = getCM(view)?.state.vim
+  if (vim == null || vim.insertMode || vim.visualMode) {
+    return false
+  }
+  const input = vim.inputState
+  return input.keyBuffer.length === 0 && input.prefixRepeat.length === 0 && input.operator == null && input.registerName == null
+}
+
+/**
  * Returns the key of a bare `h`, `j`, `k` or `l` press that Vim would take as
  * a plain motion in Normal mode: no modifiers, count, operator, register or
- * pending command (such as `f` or `r`).
+ * pending command.
  *
  * @param   {KeyboardEvent}       event  The keydown event
  * @param   {EditorView}          view   The view that received it
@@ -165,13 +184,7 @@ function vimCursorFilter (getView: () => EditorView|undefined): Extension {
  * @return  {string|undefined}           The key, or undefined
  */
 function plainVimMotionKey (event: KeyboardEvent, view: EditorView): string|undefined {
-  const vim = getCM(view)?.state.vim
-  if (![ 'h', 'j', 'k', 'l' ].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey ||
-    vim == null || vim.insertMode || vim.visualMode) {
-    return undefined
-  }
-  const input = vim.inputState
-  if (input.keyBuffer.length > 0 || input.prefixRepeat.length > 0 || input.operator != null || input.registerName != null) {
+  if (![ 'h', 'j', 'k', 'l' ].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey || !vimNormalModeIdle(view)) {
     return undefined
   }
   return event.key
@@ -219,7 +232,8 @@ function moveInRow (mainView: EditorView, step: number): void {
  * cell; this handler moves to the cell below instead, like Enter in Insert
  * mode. It also lets `hjkl` leave the cell at its edges: `h` and `l` to the
  * neighbouring cell in the row, `j` and `k` to the cell below or above, or
- * out of the table from its last or first row.
+ * out of the table from its last or first row. Lastly, it maps `u` and Ctrl-r
+ * to the main view's undo and redo.
  *
  * @param   {EditorView}  mainView  The main view
  *
@@ -232,6 +246,17 @@ function vimKeyHandler (mainView: EditorView): Extension {
       if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
         vim != null && !vim.insertMode && !vim.visualMode) {
         moveNextRow(mainView)
+        return true
+      }
+
+      // The subview has no history: `u` and Ctrl-r undo and redo in the main view
+      const isUndo = event.key === 'u' && !event.ctrlKey
+      if ((isUndo || (event.key === 'r' && event.ctrlKey)) && !event.altKey && !event.metaKey && vimNormalModeIdle(view)) {
+        if (isUndo) {
+          undo(mainView)
+        } else {
+          redo(mainView)
+        }
         return true
       }
 
