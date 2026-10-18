@@ -504,6 +504,21 @@ export const subviewUpdatePlugin = ViewPlugin.define(view => ({
       const subview = EditorView.findFromDOM(cell)
       if (subview !== null) {
         for (const tr of u.transactions) {
+          // A change across the cell's edges (such as undoing a row swap)
+          // leaves the subview without a sensible cell range. Remove it, and
+          // the table widget creates a new one if the selection is in the cell.
+          const [ from, to ] = subview.state.field(hiddenSpanField).cellRange
+          let crossesCell = false
+          tr.changes.iterChangedRanges((fromA, toA) => {
+            if (fromA < to && toA > from && (fromA < from || toA > to)) {
+              crossesCell = true
+            }
+          })
+          if (crossesCell && tr.annotation(syncAnnotation) === undefined) {
+            subview.dom.parentElement?.classList.remove('editing')
+            subview.destroy()
+            break
+          }
           maybeDispatchToSubview(subview, tr)
         }
       }
